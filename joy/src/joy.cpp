@@ -67,7 +67,7 @@ Joy::Joy(const rclcpp::NodeOptions & options)
   // -32768 and 32767.  However, we want to report a value between -1.0 and 1.0,
   // hence the "scale" dividing by 32767.  Also note that SDL returns the axes
   // with "forward" and "left" as negative.  This is opposite to the ROS
-  // conventionof "forward" and "left" as positive, so we invert the axes here
+  // convention of "forward" and "left" as positive, so we invert the axes here
   // as well.  Finally, we take into account the amount of deadzone so we truly
   // do get value between -1.0 and 1.0 (and not -deadzone to +deadzone).
   scale_ = static_cast<float>(-1.0 / (1.0 - scaled_deadzone_) / 32767.0);
@@ -88,7 +88,7 @@ Joy::Joy(const rclcpp::NodeOptions & options)
 
   sticky_buttons_ = this->declare_parameter("sticky_buttons", false);
 
-  coalesce_interval_ms_ = static_cast<int>(this->declare_parameter("coalesce_interval_ms", 1));
+  coalesce_interval_ms_ = static_cast<int>(this->declare_parameter("coalesce_interval_ms", 50));
   if (coalesce_interval_ms_ < 0) {
     throw std::runtime_error("coalesce_interval_ms must be positive");
   }
@@ -400,6 +400,9 @@ void Joy::handleJoyDeviceAdded(const SDL_Event & e)
   RCLCPP_INFO(
     get_logger(), "Opened joystick: %s.  deadzone: %f",
     SDL_JoystickName(joystick_), scaled_deadzone_);
+
+    RCLCPP_INFO(
+    get_logger(), "Coalesce: %d, Autorepeat: %f, Auto repeat interval ms: %dms", coalesce_interval_ms_, autorepeat_rate_, autorepeat_interval_ms_);
 }
 
 void Joy::handleJoyDeviceRemoved(const SDL_Event & e)
@@ -426,7 +429,9 @@ void Joy::eventThread()
   rclcpp::Time last_publish = this->now();
 
   do {
-    bool should_publish = false;
+    scaled_deadzone_ = this->get_parameter("deadzone").as_double();
+
+    volatile bool should_publish = false;
     SDL_Event e;
     int wait_time_ms = autorepeat_interval_ms_;
     if (publish_soon_) {
@@ -452,25 +457,14 @@ void Joy::eventThread()
       }
     }
 
-    if (!should_publish) {
-      // So far, nothing has indicated that we should publish.  However we need to
-      // do additional checking since there are several possible reasons:
-      // 1.  SDL_WaitEventTimeout failed
-      // 2.  SDL_WaitEventTimeout timed out
-      // 3.  SDL_WaitEventTimeout succeeded, but the event that happened didn't cause
-      //     a publish to happen.
-      //
-      // If we are autorepeating and enough time has passed, set should_publish.
-      rclcpp::Time now = this->now();
-      rclcpp::Duration diff_since_last_publish = now - last_publish;
-      if ((autorepeat_rate_ > 0.0 &&
-        RCL_NS_TO_MS(diff_since_last_publish.nanoseconds()) >= autorepeat_interval_ms_) ||
-        publish_soon_)
-      {
+    if(should_publish) {
+      const rclcpp::Time now = this->now();
+      const rclcpp::Duration diff_since_last_publish = now - last_publish;
+      
+      if(RCL_NS_TO_MS(diff_since_last_publish.nanoseconds()) < coalesce_interval_ms_)
+        should_publish = false;
+      else
         last_publish = now;
-        should_publish = true;
-        publish_soon_ = false;
-      }
     }
 
     if (joystick_ != nullptr && should_publish) {
